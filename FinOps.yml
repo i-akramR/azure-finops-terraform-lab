@@ -1,0 +1,354 @@
+trigger:
+  branches:
+    include:
+      - main
+      - feature-finops/*
+
+pool:
+  name: Agent_Nexus
+
+parameters: 
+  - name: runTFLint
+    displayName: "Run TFLint"
+    type: boolean
+    default: true
+
+  - name: runTFSec
+    displayName: "Run TFSec"
+    type: boolean
+    default: true
+
+  - name: runTrivy
+    displayName: "Run Trivy Secret Scan"
+    type: boolean
+    default: true
+
+  - name: runInfraCost
+    displayName: "Run Infrastructure Cost Analysis"
+    type: boolean
+    default: false
+
+  - name: runTerraformPlan
+    displayName: "Run Terraform Plan"
+    type: boolean
+    default: true
+
+  - name: runTerraformApply
+    displayName: "Run Terraform Apply"
+    type: boolean
+    default: false    
+    
+stages:
+  - stage: TerraformCI
+    displayName: "Terraform Validate"
+
+    jobs:
+      - job: TerraformValidation
+        displayName: "Terraform Validation"
+
+        steps:
+          - checkout: self
+          - task: TerraformInstaller@1
+            displayName: "Install Terraform"
+            inputs:
+              terraformVersion: 'latest'
+          - task: CmdLine@2
+            inputs:
+              script: 'terraform version'
+            displayName: "Terraform Version"  
+          - task: TerraformTask@5
+            displayName: "Terraform Format Check"
+            inputs:
+              provider: 'azurerm'
+              command: 'custom'
+              outputTo: 'console'
+              customCommand: 'fmt'
+              environmentServiceNameAzureRM: 'svc-phx-infra'
+          - task: TerraformTask@5
+            displayName: "Terraform Init"
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/environments/dev'
+              backendServiceArm: 'svc-phx-infra'
+              backendAzureRmOverrideSubscriptionID: 'f8b20355-0a02-41a3-8329-10cbc9dcdbb4'
+              backendAzureRmResourceGroupName: 'FinOps-RG'
+              backendAzureRmStorageAccountName: 'finops5636819'
+              backendAzureRmContainerName: 'finops'
+              backendAzureRmKey: 'finops.terraform.tfstate'
+          - task: TerraformTask@5
+            displayName: "Terraform Validate"
+            inputs:
+              provider: 'azurerm'
+              command: 'validate'
+                
+  - stage: tflint
+    displayName: "TFLint"
+
+    dependsOn: TerraformCI
+    condition: and(succeeded(),eq(${{parameters.runTFLint}}, true))
+    jobs:
+      - job: TFLint
+        displayName: "TFLint"
+
+        steps:
+          - checkout: self              
+
+          - task: CmdLine@2
+            inputs:
+              script: 'tflint --version'
+            displayName: "TFLint Version"
+          - task: CmdLine@2
+            inputs:
+              script: 'tflint --init'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/environments/dev'
+            displayName: "TFLint Init"
+          - task: CmdLine@2
+            inputs:
+              script: 'tflint'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/environments/dev'
+            displayName: "TFLint Scan"  
+
+  - stage: tfsec
+    displayName: "TFSec Scan"
+
+    dependsOn: TerraformCI
+    condition: and(succeeded(),eq(${{parameters.runTFSec}}, true))
+    jobs:
+    - job: tfsec
+      displayName: "TFSec Scan"
+
+      steps:
+        - checkout: self           
+        - task: CmdLine@2
+          inputs:
+            script: 'tfsec --version'
+          displayName: "TFSec Version"  
+        - task: CmdLine@2
+          inputs:
+            script: 'tfsec .'
+            workingDirectory: '$(System.DefaultWorkingDirectory)/environments/dev'
+          displayName: "TFSec Scan"
+
+  - stage: trivy
+    displayName: "Trivy Secret Scan"
+
+    dependsOn: TerraformCI
+    condition: and(succeeded(),eq(${{parameters.runTrivy}}, true))
+    jobs:
+    - job: trivy
+      displayName: "Trivy Secret Scan"
+
+      steps:
+        - checkout: self    
+        - task: CmdLine@2
+          inputs:
+            script: 'trivy --version'
+          displayName: "Trivy Version"  
+        - task: CmdLine@2
+          inputs:
+            script: 'trivy config .'
+          displayName: "Trivy IaC Scan"
+        - task: CmdLine@2
+          inputs:
+            script: 'trivy fs --scanners secret .'
+          displayName: "Trivy Secret Scan"
+        - task: CmdLine@2
+          inputs:
+            script: 'trivy fs --scanners secret .'
+          displayName: "Trivy Secret Scan"
+
+  - stage: infracost
+    displayName: "Infra Cost Analysis"
+
+    dependsOn: TerraformCI
+    condition: and(succeeded(),eq(${{parameters.runInfraCost}}, true))
+    jobs:
+    - job: infracost
+      displayName: "Infra Cost Analysis"
+
+      steps:
+        - checkout: self    
+    - job: CostAnalysis
+      displayName: "Infrastructure Cost Analysis"
+      steps:
+        - checkout: self
+        - task: CmdLine@2
+          displayName: "Infracost Version"
+          inputs:
+            script: 'infracost --version'
+
+        - task: CmdLine@2
+          displayName: "Infracost Cost Breakdown"
+          inputs:
+            script: 'infracost breakdown --path .'
+
+  - stage: TerraformPlan
+    displayName: "Terraform Plan"
+
+    dependsOn: 
+      - tflint
+      - tfsec
+      - trivy
+      - infracost
+    condition: |
+      and(
+        eq(${{ parameters.runTerraformPlan }}, true),
+        in(dependencies.tflint.result, 'Succeeded', 'Skipped'),
+        in(dependencies.tfsec.result, 'Succeeded', 'Skipped'),
+        in(dependencies.trivy.result, 'Succeeded', 'Skipped'),
+        in(dependencies.infracost.result, 'Succeeded', 'Skipped')
+      )
+
+    jobs:
+      - job: TerraformPlan
+        displayName: "Terraform Plan"
+
+        steps:
+          - checkout: self              
+          - task: TerraformInstaller@1
+            displayName: "Install Terraform"
+            inputs:
+              terraformVersion: 'latest'
+          - task: TerraformTask@5
+            displayName: "Terraform Init"
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/environments/dev'
+              backendServiceArm: 'svc-phx-infra'
+              backendAzureRmOverrideSubscriptionID: 'f8b20355-0a02-41a3-8329-10cbc9dcdbb4'
+              backendAzureRmResourceGroupName: 'FinOps-RG'
+              backendAzureRmStorageAccountName: 'finops5636819'
+              backendAzureRmContainerName: 'finops'
+              backendAzureRmKey: 'finops.terraform.tfstate'
+      - job: PublishTerraformPlanArtifact
+        displayName: "Publish Terraform Plan Artifact"
+
+        steps:
+          - checkout: self   
+          - task: TerraformInstaller@1
+            displayName: "Install Terraform"
+            inputs:
+              terraformVersion: 'latest'
+              
+          - task: TerraformTask@5
+            displayName: "Terraform Init"
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/environments/dev'
+              backendServiceArm: 'svc-phx-infra'
+              backendAzureRmOverrideSubscriptionID: 'f8b20355-0a02-41a3-8329-10cbc9dcdbb4'
+              backendAzureRmResourceGroupName: 'FinOps-RG'
+              backendAzureRmStorageAccountName: 'finops5636819'
+              backendAzureRmContainerName: 'finops'
+              backendAzureRmKey: 'finops.terraform.tfstate'          
+          - task: TerraformTask@5
+            displayName: "Terraform Plan"
+            inputs:
+              provider: 'azurerm'
+              command: 'plan'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/environments/dev'
+              commandOptions: '-out=tfplan'
+              environmentServiceNameAzureRM: 'svc-phx-infra'
+                         
+          - task: PublishPipelineArtifact@1
+            displayName: "Publish Terraform Plan"
+            inputs:
+              targetPath: '$(System.DefaultWorkingDirectory)/environments/dev/tfplan'
+              artifact: 'terraform-plan'
+              publishLocation: 'pipeline'
+
+  - stage: ManualApproval
+    displayName: "Mannual Approval"
+
+    dependsOn: TerraformPlan
+    condition: succeeded()
+
+    jobs:
+      - job: ManualApproval
+        displayName: "Approve Terraform Apply"
+        pool: server
+
+        steps:
+          - task: ManualValidation@1
+            displayName: "Approve Terraform Apply"
+            timeoutInMinutes: 1440
+            inputs:
+              notifyUsers: 'xyz@falcon.com'
+              instructions: |
+                Terraform Plan has completed successfully.
+                
+                Please review the Terraform plan/artifact before approving.
+                
+                Approve this validation to continue to Terraform Apply.
+              onTimeout: reject
+
+  - stage: TerraformApply
+    displayName: "Terraform Apply"
+    dependsOn: ManualApproval  
+
+    jobs:
+
+      - job: DownloadPipelineArtifact
+        displayName: "Download Terraform Plan Artifact"
+        condition: |
+          and(
+            succeeded(),
+            eq(${{ parameters.runTerraformApply }}, true)
+          )
+        steps:
+          - checkout: self
+          - task: TerraformInstaller@1
+            displayName: "Install Terraform"
+            inputs:
+              terraformVersion: 'latest'
+          - task: DownloadBuildArtifacts@1
+            displayName: "Download Terraform Plan Artifact"
+            inputs:
+              buildType: 'current'
+              downloadType: 'single'
+              artifactName: 'terraform-plan'
+              downloadPath: '$(System.ArtifactsDirectory)/environemnts/dev'
+
+      - job: TerraformApply
+        displayName: "Terraform Apply"
+        dependsOn: DownloadPipelineArtifact  
+
+        steps:
+          - checkout: self
+
+          - task: TerraformInstaller@1
+            displayName: "Install Terraform"
+            inputs:
+              terraformVersion: 'latest'
+
+          - task: DownloadBuildArtifacts@1
+            displayName: "Download Terraform Plan"
+            inputs:
+              buildType: 'current'
+              downloadType: 'single'
+              artifactName: 'terraform-plan'
+              downloadPath: '$(System.DefaultWorkingDirectory)/environments/dev'
+
+          - task: TerraformTask@5
+            displayName: "Terraform Init"
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/environments/dev'
+              backendServiceArm: 'svc-phx-infra'
+              backendAzureRmOverrideSubscriptionID: 'f8b20355-0a02-41a3-8329-10cbc9dcdbb4'
+              backendAzureRmResourceGroupName: 'FinOps-RG'
+              backendAzureRmStorageAccountName: 'finops5636819'
+              backendAzureRmContainerName: 'finops'
+              backendAzureRmKey: 'finops.terraform.tfstate'
+          - task: TerraformTask@5
+            displayName: "Terraform Apply"
+            inputs:
+              provider: 'azurerm'
+              command: 'apply'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/environments/dev'
+              commandOptions: 'tfplan'
+              environmentServiceNameAzureRM: 'svc-phx-infra'
