@@ -1,4 +1,4 @@
-*.tf linguist-detectable=false
+
 *.yaml linguist-detectable=true
 *.yml linguist-detectable=true
 
